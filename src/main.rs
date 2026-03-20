@@ -4,11 +4,11 @@ use std::path::PathBuf;
 
 fn chrome_path() -> Option<PathBuf> {
     [
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/google-chrome",
         "/opt/bin/chromium",
         "/usr/bin/chromium-browser",
         "/usr/bin/chromium",
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/google-chrome",
     ]
     .iter()
     .map(PathBuf::from)
@@ -22,8 +22,8 @@ async fn main() {
 
     // First try running chrome directly to see stderr
     if let Some(ref p) = path {
-        println!("\n=== Direct chrome launch test ===");
-        let output = std::process::Command::new(p)
+        println!("\n=== Direct chrome launch test ({}) ===", p.display());
+        let mut child = std::process::Command::new(p)
             .args([
                 "--headless",
                 "--no-sandbox",
@@ -35,14 +35,23 @@ async fn main() {
                 "--user-data-dir=/tmp/chrome-direct-test",
                 "about:blank",
             ])
-            .output();
-        match output {
-            Ok(o) => {
-                println!("Exit status: {}", o.status);
-                println!("stdout: {}", String::from_utf8_lossy(&o.stdout));
-                println!("stderr: {}", String::from_utf8_lossy(&o.stderr));
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn");
+
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output().unwrap();
+                println!("Exited: {}", status);
+                println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
             }
-            Err(e) => println!("Failed to run: {}", e),
+            Ok(None) => {
+                println!("Still running after 5s — chrome works, killing");
+                child.kill().ok();
+            }
+            Err(e) => println!("Error: {}", e),
         }
     }
 
