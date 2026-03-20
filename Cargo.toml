@@ -1,0 +1,9 @@
+[package]
+name = "chrome-ci-debug"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chromiumoxide = { version = "0.8", features = ["tokio-runtime"] }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"

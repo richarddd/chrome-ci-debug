@@ -1,0 +1,61 @@
+name: Chrome CI Debug
+
+on: push
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+
+      - name: Install Chrome variants
+        run: |
+          echo "=== Install chromium-browser (snap) ==="
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser || true
+
+          echo "=== Install google-chrome (deb) ==="
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
+          rm google-chrome-stable_current_amd64.deb
+
+      - name: Check binaries
+        run: |
+          echo "=== which ==="
+          which chromium-browser || echo "no chromium-browser"
+          which google-chrome || echo "no google-chrome"
+
+          echo "=== versions ==="
+          chromium-browser --version 2>&1 || true
+          google-chrome --version 2>&1 || true
+
+          echo "=== file type ==="
+          file $(which chromium-browser) 2>/dev/null || true
+          file $(which google-chrome) 2>/dev/null || true
+
+      - name: Test direct headless - chromium-browser
+        run: |
+          echo "=== chromium-browser headless ==="
+          timeout 15 chromium-browser \
+            --headless --no-sandbox --no-zygote --single-process \
+            --disable-gpu --disable-dev-shm-usage \
+            --remote-debugging-port=0 \
+            --user-data-dir=/tmp/chrome-test-snap \
+            about:blank 2>&1 || echo "Exit: $?"
+
+      - name: Test direct headless - google-chrome
+        run: |
+          echo "=== google-chrome headless ==="
+          timeout 15 google-chrome \
+            --headless --no-sandbox --no-zygote --single-process \
+            --disable-gpu --disable-dev-shm-usage \
+            --remote-debugging-port=0 \
+            --user-data-dir=/tmp/chrome-test-deb \
+            about:blank 2>&1 || echo "Exit: $?"
+
+      - name: Build and run Rust test
+        run: cargo run 2>&1
