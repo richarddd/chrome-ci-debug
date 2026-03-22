@@ -1,13 +1,14 @@
 #[macro_use]
 pub mod multiprocessor;
 pub mod lok;
-pub mod dummy;
+pub mod pdfium;
 
 #[cfg(test)]
 mod tests {
     use super::lok::*;
-    use super::dummy::*;
+    use super::pdfium::*;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_lok_convert() {
@@ -24,8 +25,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_pdf_extract() {
         let pdf_bytes = include_bytes!("../fixtures/sample.pdf");
-        let result = PDF_POOL.process(PdfIn(pdf_bytes.to_vec())).await.unwrap();
-        println!("PDF extract: OK ({} chars)", result.0.len());
+        let result = PDF_POOL.process(PdfInput {
+            bytes: pdf_bytes.to_vec(),
+            task: PdfTask::TextOnly,
+        }).await.unwrap();
+        println!("PDF extract: OK ({} chars)", result.text.len());
     }
 }
 
