@@ -1,0 +1,9 @@
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "-Ctarget-feature=+crt-static",
+    "-Ctarget-cpu=haswell",
+    "-Zunstable-options",
+    "-Cpanic=immediate-abort",
+    "-Zthreads=10",
+    "-Zpanic_abort_tests",
+]
