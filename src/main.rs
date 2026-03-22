@@ -2,69 +2,61 @@
 pub mod multiprocessor;
 
 use anyhow::Result;
-use libreofficekit::Office;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+// === LOK Pool ===
 #[derive(Serialize, Deserialize, Clone)]
-pub struct LokInput {
-    pub input: PathBuf,
-    pub output: PathBuf,
-    pub format: String,
-}
-
+pub struct LokInput { pub input: PathBuf, pub output: PathBuf, pub format: String }
 #[derive(Serialize, Deserialize)]
 pub struct LokOutput;
 
-fn lok_init() -> Result<Office> {
-    let path = Office::find_install_path()
+fn lok_init() -> Result<libreofficekit::Office> {
+    let path = libreofficekit::Office::find_install_path()
         .ok_or_else(|| anyhow::anyhow!("LibreOffice not found"))?;
-    eprintln!("[Worker] LOK path: {}", path.display());
-    Office::new(&path).map_err(|e| anyhow::anyhow!("LOK init failed at {}: {e}", path.display()))
+    eprintln!("[LOK Worker] init at {}", path.display());
+    libreofficekit::Office::new(&path).map_err(|e| anyhow::anyhow!("{e}"))
 }
-
-fn lok_work(office: &Office, input: LokInput) -> Result<LokOutput> {
+fn lok_work(office: &libreofficekit::Office, input: LokInput) -> Result<LokOutput> {
     use libreofficekit::DocUrl;
-    let input_url = DocUrl::from_path(&input.input)?;
-    let output_url = DocUrl::from_path(&input.output)?;
-    let mut doc = office.document_load(&input_url)?;
-    doc.save_as(&output_url, &input.format, None)?;
+    let i = DocUrl::from_path(&input.input)?;
+    let o = DocUrl::from_path(&input.output)?;
+    let mut doc = office.document_load(&i)?;
+    doc.save_as(&o, &input.format, None)?;
     Ok(LokOutput)
 }
+fork_pool!(LOK_POOL, LokInput => LokOutput, { init: lok_init, work: lok_work, concurrency: 1 });
 
-fork_pool!(LOK_POOL, LokInput => LokOutput, {
-    init: lok_init,
-    work: lok_work,
-    concurrency: 1,
-});
+// === Dummy second pool (simulates PDF_POOL) ===
+#[derive(Serialize, Deserialize, Clone)]
+pub struct DummyIn(u32);
+#[derive(Serialize, Deserialize)]
+pub struct DummyOut(u32);
+fn dummy_init() -> Result<()> { eprintln!("[Dummy Worker] init"); Ok(()) }
+fn dummy_work(_: &(), input: DummyIn) -> Result<DummyOut> { Ok(DummyOut(input.0 * 2)) }
+fork_pool!(DUMMY_POOL, DummyIn => DummyOut, { init: dummy_init, work: dummy_work, concurrency: 1 });
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_convert() {
-        let test_dir = PathBuf::from("/tmp/lok-test-convert");
-        std::fs::create_dir_all(&test_dir).unwrap();
+    async fn test_dummy_pool() {
+        let r = DUMMY_POOL.process(DummyIn(21)).await.unwrap();
+        assert_eq!(r.0, 42);
+        println!("Dummy pool: OK");
+    }
 
-        let input = test_dir.join("test.txt");
-        let output = test_dir.join("test.pdf");
-        std::fs::write(&input, "Hello from LOK test").unwrap();
-
-        let result = LOK_POOL.process(LokInput {
-            input: input.clone(),
-            output: output.clone(),
-            format: "pdf".to_string(),
-        }).await;
-
-        match &result {
-            Ok(_) => {
-                let size = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
-                println!("SUCCESS: {} bytes", size);
-            }
-            Err(e) => println!("FAIL: {e:#}"),
-        }
-        result.unwrap();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_lok_convert() {
+        let dir = PathBuf::from("/tmp/lok-test-ci");
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("test.txt");
+        let output = dir.join("test.pdf");
+        std::fs::write(&input, "Hello").unwrap();
+        LOK_POOL.process(LokInput { input, output: output.clone(), format: "pdf".into() }).await.unwrap();
+        assert!(output.exists());
+        println!("LOK convert: OK ({} bytes)", std::fs::metadata(&output).unwrap().len());
     }
 }
 
