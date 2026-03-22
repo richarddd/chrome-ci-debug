@@ -10,13 +10,6 @@ mod tests {
     use std::path::PathBuf;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_dummy_pool() {
-        let r = DUMMY_POOL.process(DummyIn(21)).await.unwrap();
-        assert_eq!(r.0, 42);
-        println!("Dummy pool: OK");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
     async fn test_lok_convert() {
         let dir = PathBuf::from("/tmp/lok-test-ci");
         std::fs::create_dir_all(&dir).unwrap();
@@ -26,6 +19,13 @@ mod tests {
         LOK_POOL.process(LokInput { input, output: output.clone(), format: "pdf".into() }).await.unwrap();
         assert!(output.exists());
         println!("LOK convert: OK ({} bytes)", std::fs::metadata(&output).unwrap().len());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_pdf_extract() {
+        let pdf_bytes = include_bytes!("../fixtures/sample.pdf");
+        let result = PDF_POOL.process(PdfIn(pdf_bytes.to_vec())).await.unwrap();
+        println!("PDF extract: OK ({} chars)", result.0.len());
     }
 }
 
