@@ -1,56 +1,32 @@
 use crate::fork_pool;
 use anyhow::Result;
-use pdfium_render::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
-static WARMUP: &[u8] = include_bytes!("../fixtures/sample.pdf");
-
-fn load_pdfium() -> Result<Pdfium> {
-    eprintln!("[PDF Worker] init");
-    let pdfium = Pdfium::new(Pdfium::bind_to_statically_linked_library()?);
-    warmup(&pdfium);
-    eprintln!("[PDF Worker] init OK");
-    Ok(pdfium)
-}
-
-fn warmup(pdfium: &Pdfium) {
-    if let Ok(doc) = pdfium.load_pdf_from_byte_slice(WARMUP, None) {
-        for page in doc.pages().iter() {
-            let _ = page.text().map(|t| t.all());
+// Simulate a heavy init like pdfium - dlopen a real library
+fn heavy_init() -> Result<()> {
+    eprintln!("[Heavy Worker] init - loading libm.so");
+    // dlopen a real shared library to simulate pdfium's static init
+    unsafe {
+        let handle = libc::dlopen(
+            b"libm.so.6\0".as_ptr() as *const _,
+            libc::RTLD_NOW,
+        );
+        if handle.is_null() {
+            return Err(anyhow::anyhow!("dlopen failed"));
         }
     }
+    eprintln!("[Heavy Worker] init OK");
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct PdfInput {
-    pub bytes: Vec<u8>,
-    pub task: PdfTask,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub enum PdfTask {
-    Full { filename: Arc<str> },
-    TextOnly,
-}
-
+pub struct HeavyIn(pub u32);
 #[derive(Serialize, Deserialize)]
-pub struct PdfOutput {
-    pub text: String,
+pub struct HeavyOut(pub u32);
+
+fn heavy_work(_: &(), input: HeavyIn) -> Result<HeavyOut> {
+    Ok(HeavyOut(input.0 * 2))
 }
 
-fn pdf_process(pdfium: &Pdfium, input: PdfInput) -> Result<PdfOutput> {
-    let doc = pdfium.load_pdf_from_byte_slice(&input.bytes, None)?;
-    let mut text = String::new();
-    for page in doc.pages().iter() {
-        if let Ok(t) = page.text() {
-            text.push_str(&t.all());
-        }
-    }
-    Ok(PdfOutput { text })
-}
-
-fork_pool!(PDF_POOL, PdfInput => PdfOutput, {
-    init: load_pdfium,
-    work: pdf_process,
-});
+// Use default concurrency (multiple workers) like PDF_POOL does
+fork_pool!(HEAVY_POOL, HeavyIn => HeavyOut, { init: heavy_init, work: heavy_work });

@@ -1,2 +1,0 @@
-[env]
-PDFIUM_STATIC_LIB_PATH = { value = "libs/x86_64-unknown-linux-gnu", relative = true }

@@ -8,7 +8,6 @@ mod tests {
     use super::lok::*;
     use super::pdfium::*;
     use std::path::PathBuf;
-    use std::sync::Arc;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_lok_convert() {
@@ -23,13 +22,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_pdf_extract() {
-        let pdf_bytes = include_bytes!("../fixtures/sample.pdf");
-        let result = PDF_POOL.process(PdfInput {
-            bytes: pdf_bytes.to_vec(),
-            task: PdfTask::TextOnly,
-        }).await.unwrap();
-        println!("PDF extract: OK ({} chars)", result.text.len());
+    async fn test_heavy_pool() {
+        let result = HEAVY_POOL.process(HeavyIn(21)).await.unwrap();
+        assert_eq!(result.0, 42);
+        println!("Heavy pool: OK");
     }
 }
 
