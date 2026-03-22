@@ -1,97 +1,71 @@
-use chromiumoxide::browser::{Browser, BrowserConfig};
-use futures::StreamExt;
+#[macro_use]
+pub mod multiprocessor;
+
+use anyhow::Result;
+use libreofficekit::Office;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-fn chrome_path() -> Option<PathBuf> {
-    [
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/google-chrome",
-        "/opt/bin/chromium",
-        "/usr/bin/chromium-browser",
-        "/usr/bin/chromium",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .find(|p| p.exists())
+#[derive(Serialize, Deserialize, Clone)]
+pub struct LokInput {
+    pub input: PathBuf,
+    pub output: PathBuf,
+    pub format: String,
 }
 
-#[tokio::main]
-async fn main() {
-    let path = chrome_path();
-    println!("Chrome path: {:?}", path);
+#[derive(Serialize, Deserialize)]
+pub struct LokOutput;
 
-    // First try running chrome directly to see stderr
-    if let Some(ref p) = path {
-        println!("\n=== Direct chrome launch test ({}) ===", p.display());
-        let mut child = std::process::Command::new(p)
-            .args([
-                "--headless",
-                "--no-sandbox",
-                "--no-zygote",
-                "--single-process",
-                "--disable-gpu",
-                "--disable-dev-shm-usage",
-                "--remote-debugging-port=0",
-                "--user-data-dir=/tmp/chrome-direct-test",
-                "about:blank",
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("failed to spawn");
+fn lok_init() -> Result<Office> {
+    let path = Office::find_install_path()
+        .ok_or_else(|| anyhow::anyhow!("LibreOffice not found"))?;
+    eprintln!("[Worker] LOK path: {}", path.display());
+    Office::new(&path).map_err(|e| anyhow::anyhow!("LOK init failed at {}: {e}", path.display()))
+}
 
-        std::thread::sleep(std::time::Duration::from_secs(5));
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let output = child.wait_with_output().unwrap();
-                println!("Exited: {}", status);
-                println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+fn lok_work(office: &Office, input: LokInput) -> Result<LokOutput> {
+    use libreofficekit::DocUrl;
+    let input_url = DocUrl::from_path(&input.input)?;
+    let output_url = DocUrl::from_path(&input.output)?;
+    let mut doc = office.document_load(&input_url)?;
+    doc.save_as(&output_url, &input.format, None)?;
+    Ok(LokOutput)
+}
+
+fork_pool!(LOK_POOL, LokInput => LokOutput, {
+    init: lok_init,
+    work: lok_work,
+    concurrency: 1,
+});
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_convert() {
+        let test_dir = PathBuf::from("/tmp/lok-test-convert");
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let input = test_dir.join("test.txt");
+        let output = test_dir.join("test.pdf");
+        std::fs::write(&input, "Hello from LOK test").unwrap();
+
+        let result = LOK_POOL.process(LokInput {
+            input: input.clone(),
+            output: output.clone(),
+            format: "pdf".to_string(),
+        }).await;
+
+        match &result {
+            Ok(_) => {
+                let size = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
+                println!("SUCCESS: {} bytes", size);
             }
-            Ok(None) => {
-                println!("Still running after 5s — chrome works, killing");
-                child.kill().ok();
-            }
-            Err(e) => println!("Error: {}", e),
+            Err(e) => println!("FAIL: {e:#}"),
         }
-    }
-
-    // Now try via chromiumoxide
-    println!("\n=== chromiumoxide launch test ===");
-    let user_data_dir = std::env::temp_dir().join("chrome-oxide-test");
-
-    let mut builder = BrowserConfig::builder()
-        .no_sandbox()
-        .args(vec![
-            "--no-zygote",
-            "--single-process",
-            "--disable-gpu",
-            "--disable-dev-shm-usage",
-        ])
-        .user_data_dir(&user_data_dir);
-
-    if let Some(p) = path {
-        builder = builder.chrome_executable(p);
-    }
-
-    let config = builder.build().unwrap();
-
-    match Browser::launch(config).await {
-        Ok((browser, mut handler)) => {
-            println!("Browser launched successfully!");
-            tokio::spawn(async move {
-                while let Some(h) = handler.next().await {
-                    if h.is_err() {
-                        break;
-                    }
-                }
-            });
-            let page = browser.new_page("about:blank").await;
-            println!("New page result: {:?}", page.is_ok());
-            drop(browser);
-        }
-        Err(e) => {
-            println!("Browser launch failed: {}", e);
-            println!("Debug: {:?}", e);
-        }
+        result.unwrap();
     }
 }
+
+fn main() {}
