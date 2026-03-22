@@ -9,8 +9,10 @@ use std::{
     collections::{HashMap, VecDeque},
     os::unix::io::{FromRawFd, IntoRawFd},
     panic::AssertUnwindSafe,
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, atomic::{AtomicBool, Ordering}},
 };
+
+static IS_FORK_CHILD: AtomicBool = AtomicBool::new(false);
 use tokio::{
     net::UnixStream,
     sync::{mpsc, oneshot},
@@ -144,6 +146,11 @@ where
         InitFn: Fn() -> Result<Ctx> + Clone + Send + 'static,
         WorkFn: Fn(&Ctx, I) -> Result<O> + Copy + Send + 'static,
     {
+        // Skip if we're already a forked child from another pool
+        if IS_FORK_CHILD.load(Ordering::SeqCst) {
+            return;
+        }
+
         let concurrency = if concurrency == 0 {
             std::thread::available_parallelism()
                 .map(|n| n.get())
@@ -165,6 +172,7 @@ where
                     streams.push(parent_sock.into_raw_fd());
                 }
                 ForkResult::Child => {
+                    IS_FORK_CHILD.store(true, Ordering::SeqCst);
                     // Die when parent exits
                     #[cfg(target_os = "linux")]
                     unsafe {
