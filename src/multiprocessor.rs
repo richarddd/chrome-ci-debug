@@ -147,6 +147,15 @@ where
     {
         // Skip if already initialized or if we're a forked child
         if self.sender.get().is_some() || IS_FORK_CHILD.load(Ordering::SeqCst) {
+            let _ = std::fs::OpenOptions::new().create(true).append(true)
+                .open("/tmp/forkpool_deferred.log")
+                .and_then(|mut f| {
+                    use std::io::Write;
+                    writeln!(f, "pid={} SKIP init_pool (sender={}, fork_child={})",
+                        std::process::id(),
+                        self.sender.get().is_some(),
+                        IS_FORK_CHILD.load(Ordering::SeqCst))
+                });
             return;
         }
 
@@ -227,8 +236,22 @@ where
         let mut framed = Framed::new(stream, RmpCodec::<Msg<I, O>>::new());
 
         let ctx = match init_fn() {
-            Ok(c) => c,
+            Ok(c) => {
+                let _ = std::fs::OpenOptions::new().create(true).append(true)
+                    .open("/tmp/forkpool_deferred.log")
+                    .and_then(|mut f| {
+                        use std::io::Write;
+                        writeln!(f, "pid={} worker init OK, sending Ready", std::process::id())
+                    });
+                c
+            }
             Err(e) => {
+                let _ = std::fs::OpenOptions::new().create(true).append(true)
+                    .open("/tmp/forkpool_deferred.log")
+                    .and_then(|mut f| {
+                        use std::io::Write;
+                        writeln!(f, "pid={} worker init FAILED: {e:#}", std::process::id())
+                    });
                 eprintln!("[ForkPool Worker {}] Init failed: {e:#}", std::process::id());
                 return;
             }
@@ -236,8 +259,20 @@ where
 
         use futures::SinkExt;
         if framed.send(Msg::Ready).await.is_err() {
+            let _ = std::fs::OpenOptions::new().create(true).append(true)
+                .open("/tmp/forkpool_deferred.log")
+                .and_then(|mut f| {
+                    use std::io::Write;
+                    writeln!(f, "pid={} Ready send FAILED", std::process::id())
+                });
             return;
         }
+        let _ = std::fs::OpenOptions::new().create(true).append(true)
+            .open("/tmp/forkpool_deferred.log")
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "pid={} Ready sent, waiting for jobs", std::process::id())
+            });
 
         use futures::StreamExt;
         while let Some(Ok(msg)) = framed.next().await {
@@ -432,11 +467,23 @@ macro_rules! fork_pool {
         #[ctor::ctor]
         fn __init_fork_pool_ctor() {
             std::thread::spawn(|| {
-                // Wait for .init_array to complete by doing a dummy dlopen.
-                // The dl mutex is held during .init_array; this blocks until released.
                 #[cfg(target_os = "linux")]
                 unsafe { libc::dlopen(std::ptr::null(), libc::RTLD_NOW); }
+
+                let _ = std::fs::OpenOptions::new().create(true).append(true)
+                    .open("/tmp/forkpool_deferred.log")
+                    .and_then(|mut f| {
+                        use std::io::Write;
+                        writeln!(f, "pid={} ppid={} dlopen done, calling init_pool",
+                            std::process::id(), nix::unistd::getppid())
+                    });
                 $name.init_pool($crate::fork_pool!(@concurrency $($n)?), $init, $work);
+                let _ = std::fs::OpenOptions::new().create(true).append(true)
+                    .open("/tmp/forkpool_deferred.log")
+                    .and_then(|mut f| {
+                        use std::io::Write;
+                        writeln!(f, "pid={} init_pool returned", std::process::id())
+                    });
             });
         }
     };
