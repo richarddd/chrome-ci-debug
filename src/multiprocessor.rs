@@ -13,12 +13,12 @@ use std::{
 };
 
 static IS_FORK_CHILD: AtomicBool = AtomicBool::new(false);
+
 use tokio::{
     net::UnixStream,
     sync::{mpsc, oneshot},
 };
 use tokio_util::codec::{Decoder, Encoder, Framed};
-use tracing;
 
 // --- Protocol & Codec ---
 
@@ -135,7 +135,6 @@ where
             sender: OnceLock::new(),
         }
     }
-
     pub fn init_pool<Ctx, InitFn, WorkFn>(
         &self,
         concurrency: usize,
@@ -146,53 +145,8 @@ where
         InitFn: Fn() -> Result<Ctx> + Clone + Send + 'static,
         WorkFn: Fn(&Ctx, I) -> Result<O> + Copy + Send + 'static,
     {
-        self.init_pool_inner(concurrency, init_fn, None, work_fn);
-    }
-
-    /// Like init_pool but calls init_fn in the parent before forking.
-    /// The child inherits the context via fork's memory copy and skips init_fn.
-    /// Use this when init_fn does dlopen which deadlocks after fork during .init_array.
-    pub fn init_pool_prefork<Ctx, InitFn, WorkFn>(
-        &self,
-        concurrency: usize,
-        init_fn: InitFn,
-        work_fn: WorkFn,
-    ) where
-        Ctx: 'static,
-        InitFn: Fn() -> Result<Ctx> + Clone + Send + 'static,
-        WorkFn: Fn(&Ctx, I) -> Result<O> + Copy + Send + 'static,
-    {
-        match init_fn() {
-            Ok(ctx) => self.init_pool_inner(concurrency, init_fn, Some(ctx), work_fn),
-            Err(e) => {
-                eprintln!("[ForkPool] prefork init failed: {e:#}");
-                // Still set up the pool so process() returns errors instead of panicking
-                let (tx, _rx) = mpsc::unbounded_channel();
-                let _ = self.sender.set(tx);
-            }
-        }
-    }
-
-    fn init_pool_inner<Ctx, InitFn, WorkFn>(
-        &self,
-        concurrency: usize,
-        init_fn: InitFn,
-        prefork_ctx: Option<Ctx>,
-        work_fn: WorkFn,
-    ) where
-        Ctx: 'static,
-        InitFn: Fn() -> Result<Ctx> + Clone + Send + 'static,
-        WorkFn: Fn(&Ctx, I) -> Result<O> + Copy + Send + 'static,
-    {
-        // Skip if we're already a forked child from another pool
-        if IS_FORK_CHILD.load(Ordering::SeqCst) {
-            let _ = std::fs::OpenOptions::new()
-                .create(true).append(true)
-                .open("/tmp/forkpool.log")
-                .and_then(|mut f| {
-                    use std::io::Write;
-                    writeln!(f, "pid={} SKIPPED-init_pool (is_fork_child=true)", std::process::id())
-                });
+        // Skip if already initialized or if we're a forked child
+        if self.sender.get().is_some() || IS_FORK_CHILD.load(Ordering::SeqCst) {
             return;
         }
 
@@ -207,17 +161,9 @@ where
         let mut streams = Vec::with_capacity(concurrency);
         let mut child_fd_opt: Option<i32> = None;
 
-        for i in 0..concurrency {
+        for _ in 0..concurrency {
             let (parent_sock, child_sock) =
                 std::os::unix::net::UnixStream::pair().expect("Failed to create socketpair");
-
-            let _ = std::fs::OpenOptions::new()
-                .create(true).append(true)
-                .open("/tmp/forkpool.log")
-                .and_then(|mut f| {
-                    use std::io::Write;
-                    writeln!(f, "pid={} FORKING worker {i}/{concurrency}", std::process::id())
-                });
 
             match unsafe { fork() }.expect("fork failed") {
                 ForkResult::Parent { .. } => {
@@ -225,19 +171,11 @@ where
                     streams.push(parent_sock.into_raw_fd());
                 }
                 ForkResult::Child => {
-                    // Log immediately after fork
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true).append(true)
-                        .open("/tmp/forkpool.log")
-                        .and_then(|mut f| {
-                            use std::io::Write;
-                            writeln!(f, "pid={} CHILD-BORN", std::process::id())
-                        });
                     IS_FORK_CHILD.store(true, Ordering::SeqCst);
                     // Kill child when parent process exits.
-                    // We use getppid() polling instead of PR_SET_PDEATHSIG because
-                    // the latter tracks the forking *thread*, not process — if the
-                    // forking thread exits (deferred fork pools), children get killed.
+                    // Uses ppid polling instead of PR_SET_PDEATHSIG because the latter
+                    // tracks the forking *thread*, not process — if the forking thread
+                    // exits (deferred fork pools), children get killed immediately.
                     let ppid = nix::unistd::getppid();
                     std::thread::spawn(move || {
                         loop {
@@ -247,38 +185,15 @@ where
                             }
                         }
                     });
-                    #[cfg(target_os = "macos")]
-                    {
-                        let ppid = nix::unistd::getppid().as_raw();
-                        std::thread::spawn(move || unsafe {
-                            let kq = libc::kqueue();
-                            let mut event: libc::kevent = std::mem::zeroed();
-                            event.ident = ppid as usize;
-                            event.filter = libc::EVFILT_PROC;
-                            event.flags = libc::EV_ADD;
-                            event.fflags = libc::NOTE_EXIT;
-                            libc::kevent(kq, &event, 1, &mut event, 1, std::ptr::null());
-                            std::process::exit(1);
-                        });
-                    }
                     drop(parent_sock);
                     child_fd_opt = Some(child_sock.into_raw_fd());
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true).append(true)
-                        .open("/tmp/forkpool.log")
-                        .and_then(|mut f| {
-                            use std::io::Write;
-                            writeln!(f, "pid={} CHILD-READY fd={}", std::process::id(), child_fd_opt.unwrap())
-                        });
                     break;
                 }
             }
         }
 
         let (tx, rx) = mpsc::unbounded_channel();
-        if self.sender.set(tx).is_err() {
-            panic!("StaticForkPool initialized twice");
-        }
+        let _ = self.sender.set(tx);
 
         if let Some(fd) = child_fd_opt {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -286,11 +201,10 @@ where
                 .build()
                 .expect("Failed to build worker runtime");
 
-            rt.block_on(Self::run_worker(fd, prefork_ctx, init_fn, work_fn));
+            rt.block_on(Self::run_worker(fd, init_fn, work_fn));
             std::process::exit(0);
         }
 
-        // Router on a separate thread so init_pool can return
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -300,53 +214,30 @@ where
         });
     }
 
-    async fn run_worker<Ctx, InitFn, WorkFn>(fd: i32, prefork_ctx: Option<Ctx>, init_fn: InitFn, work_fn: WorkFn)
+    async fn run_worker<Ctx, InitFn, WorkFn>(fd: i32, init_fn: InitFn, work_fn: WorkFn)
     where
         Ctx: 'static,
         InitFn: Fn() -> Result<Ctx>,
         WorkFn: Fn(&Ctx, I) -> Result<O>,
     {
-        let pid = std::process::id();
-        let log = |step: &str| {
-            let _ = std::fs::OpenOptions::new()
-                .create(true).append(true)
-                .open("/tmp/forkpool.log")
-                .and_then(|mut f| {
-                    use std::io::Write;
-                    writeln!(f, "pid={pid} {step}")
-                });
-        };
-        log("1-worker-start");
         let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
-        log("2-from-raw-fd");
         stream.set_nonblocking(true).unwrap();
-        log("3-set-nonblocking");
         let stream = UnixStream::from_std(stream).unwrap();
-        log("4-unix-stream");
 
         let mut framed = Framed::new(stream, RmpCodec::<Msg<I, O>>::new());
-        log("5-framed");
 
-        let ctx = if let Some(ctx) = prefork_ctx {
-            log("6-using-prefork-ctx");
-            ctx
-        } else {
-            match init_fn() {
-                Ok(c) => { log("6-init-ok"); c }
-                Err(e) => {
-                    log(&format!("6-init-FAILED: {e:#}"));
-                    return;
-                }
+        let ctx = match init_fn() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[ForkPool Worker {}] Init failed: {e:#}", std::process::id());
+                return;
             }
         };
 
         use futures::SinkExt;
-        log("7-sending-ready");
         if framed.send(Msg::Ready).await.is_err() {
-            log("7-send-ready-FAILED");
             return;
         }
-        log("8-ready-sent");
 
         use futures::StreamExt;
         while let Some(Ok(msg)) = framed.next().await {
@@ -506,6 +397,10 @@ where
     }
 
     pub fn process(&self, input: I) -> impl std::future::Future<Output = Result<O>> + Send {
+        // Wait for pool to be initialized (may be initializing on a background thread)
+        while self.sender.get().is_none() {
+            std::thread::yield_now();
+        }
         let pool_result = (|| {
             let tx = self
                 .sender
@@ -528,15 +423,24 @@ where
 
 #[macro_export]
 macro_rules! fork_pool {
-    ($name:ident, $in:ty => $out:ty, { init: $init:path, work: $work:expr, concurrency: $n:expr, prefork_init: true $(,)? }) => {
+    // Deferred: spawns a thread from #[ctor] that forks after .init_array completes.
+    // Use for pools whose init_fn does dlopen (e.g. LibreOffice).
+    ($name:ident, $in:ty => $out:ty, { init: $init:path, work: $work:expr $(, concurrency: $n:expr)? , deferred: true $(,)? }) => {
         pub static $name: $crate::multiprocessor::StaticForkPool<$in, $out> =
             $crate::multiprocessor::StaticForkPool::new();
 
         #[ctor::ctor]
         fn __init_fork_pool_ctor() {
-            $name.init_pool_prefork($n, $init, $work);
+            // Spawn a thread that waits for .init_array to finish (dl mutex released),
+            // then forks. The dl mutex is held by the main thread during .init_array;
+            // our thread's init_pool→fork→child→dlopen will block until it's released,
+            // then proceed without deadlock.
+            std::thread::spawn(|| {
+                $name.init_pool($crate::fork_pool!(@concurrency $($n)?), $init, $work);
+            });
         }
     };
+    // Immediate: forks directly in #[ctor]. Use for pools with no dlopen (e.g. pdfium).
     ($name:ident, $in:ty => $out:ty, { init: $init:path, work: $work:expr $(, concurrency: $n:expr)? $(,)? }) => {
         pub static $name: $crate::multiprocessor::StaticForkPool<$in, $out> =
             $crate::multiprocessor::StaticForkPool::new();
@@ -550,57 +454,3 @@ macro_rules! fork_pool {
     (@concurrency $n:expr) => { $n };
 }
 
-
-/// A fork pool that defers forking until first process() call.
-/// This avoids dlopen deadlocks when forking during .init_array.
-pub struct DeferredForkPool<I, O> {
-    inner: StaticForkPool<I, O>,
-    init_done: std::sync::Once,
-    init_fn: OnceLock<Box<dyn Fn(&StaticForkPool<I, O>) + Send + Sync>>,
-}
-
-impl<I, O> DeferredForkPool<I, O>
-where
-    I: Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
-    O: Serialize + DeserializeOwned + Send + Sync + 'static,
-{
-    pub const fn new() -> Self {
-        Self {
-            inner: StaticForkPool::new(),
-            init_done: std::sync::Once::new(),
-            init_fn: OnceLock::new(),
-        }
-    }
-
-    pub fn set_init(&self, f: Box<dyn Fn(&StaticForkPool<I, O>) + Send + Sync>) {
-        let _ = self.init_fn.set(f);
-    }
-
-    pub fn process(&self, input: I) -> impl std::future::Future<Output = Result<O>> + Send {
-        self.init_done.call_once(|| {
-            if let Some(f) = self.init_fn.get() {
-                std::thread::scope(|s| {
-                    s.spawn(|| f(&self.inner));
-                });
-            }
-        });
-        self.inner.process(input)
-    }
-}
-
-#[macro_export]
-macro_rules! deferred_fork_pool {
-    ($name:ident, $in:ty => $out:ty, { init: $init:path, work: $work:expr $(, concurrency: $n:expr)? $(,)? }) => {
-        pub static $name: $crate::multiprocessor::DeferredForkPool<$in, $out> =
-            $crate::multiprocessor::DeferredForkPool::new();
-
-        #[ctor::ctor]
-        fn __init_deferred_fork_pool_ctor() {
-            $name.set_init(Box::new(|pool| {
-                pool.init_pool($crate::fork_pool!(@concurrency $($n)?), $init, $work);
-            }));
-        }
-    };
-    (@concurrency) => { 0 };
-    (@concurrency $n:expr) => { $n };
-}
