@@ -526,3 +526,58 @@ macro_rules! fork_pool {
     (@concurrency $n:expr) => { $n };
 }
 
+
+/// A fork pool that defers forking until first process() call.
+/// This avoids dlopen deadlocks when forking during .init_array.
+pub struct DeferredForkPool<I, O> {
+    inner: StaticForkPool<I, O>,
+    init_done: std::sync::Once,
+    init_fn: OnceLock<Box<dyn Fn(&StaticForkPool<I, O>) + Send + Sync>>,
+}
+
+impl<I, O> DeferredForkPool<I, O>
+where
+    I: Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
+    O: Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    pub const fn new() -> Self {
+        Self {
+            inner: StaticForkPool::new(),
+            init_done: std::sync::Once::new(),
+            init_fn: OnceLock::new(),
+        }
+    }
+
+    pub fn set_init(&self, f: Box<dyn Fn(&StaticForkPool<I, O>) + Send + Sync>) {
+        let _ = self.init_fn.set(f);
+    }
+
+    pub fn process(&self, input: I) -> impl std::future::Future<Output = Result<O>> + Send {
+        self.init_done.call_once(|| {
+            if let Some(f) = self.init_fn.get() {
+                // Fork from a blocking thread to avoid "runtime within runtime" in the child
+                std::thread::scope(|s| {
+                    s.spawn(|| f(&self.inner));
+                });
+            }
+        });
+        self.inner.process(input)
+    }
+}
+
+#[macro_export]
+macro_rules! deferred_fork_pool {
+    ($name:ident, $in:ty => $out:ty, { init: $init:path, work: $work:expr $(, concurrency: $n:expr)? $(,)? }) => {
+        pub static $name: $crate::multiprocessor::DeferredForkPool<$in, $out> =
+            $crate::multiprocessor::DeferredForkPool::new();
+
+        #[ctor::ctor]
+        fn __init_deferred_fork_pool_ctor() {
+            $name.set_init(Box::new(|pool| {
+                pool.init_pool($crate::fork_pool!(@concurrency $($n)?), $init, $work);
+            }));
+        }
+    };
+    (@concurrency) => { 0 };
+    (@concurrency $n:expr) => { $n };
+}
