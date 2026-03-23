@@ -21,4 +21,4 @@ fn lok_work(office: &libreofficekit::Office, input: LokInput) -> Result<LokOutpu
     doc.save_as(&o, &input.format, None)?;
     Ok(LokOutput)
 }
-fork_pool!(LOK_POOL, LokInput => LokOutput, { init: lok_init, work: lok_work, concurrency: 1 });
+fork_pool!(LOK_POOL, LokInput => LokOutput, { init: lok_init, work: lok_work, concurrency: 1, prefork_init: true });

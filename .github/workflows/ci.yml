@@ -14,7 +14,11 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libreoffice libc++-dev libc++abi-dev
+          sudo apt-get install -y libreoffice
 
       - name: Run tests
-        run: cargo test -- --nocapture 2>&1
+        run: cargo test -- --nocapture
+
+      - name: Fork pool logs
+        if: always()
+        run: cat /tmp/forkpool.log 2>/dev/null || echo "No logs"
