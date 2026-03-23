@@ -234,11 +234,6 @@ where
                             writeln!(f, "pid={} CHILD-BORN", std::process::id())
                         });
                     IS_FORK_CHILD.store(true, Ordering::SeqCst);
-                    // Die when parent exits
-                    #[cfg(target_os = "linux")]
-                    unsafe {
-                        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-                    }
                     #[cfg(target_os = "macos")]
                     {
                         let ppid = nix::unistd::getppid().as_raw();
@@ -282,6 +277,7 @@ where
             std::process::exit(0);
         }
 
+        // Router on a separate thread so init_pool can return
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -570,7 +566,6 @@ where
     pub fn process(&self, input: I) -> impl std::future::Future<Output = Result<O>> + Send {
         self.init_done.call_once(|| {
             if let Some(f) = self.init_fn.get() {
-                // Fork from a blocking thread to avoid "runtime within runtime" in the child
                 std::thread::scope(|s| {
                     s.spawn(|| f(&self.inner));
                 });
