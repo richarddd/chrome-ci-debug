@@ -225,6 +225,14 @@ where
                     streams.push(parent_sock.into_raw_fd());
                 }
                 ForkResult::Child => {
+                    // Log immediately after fork
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true).append(true)
+                        .open("/tmp/forkpool.log")
+                        .and_then(|mut f| {
+                            use std::io::Write;
+                            writeln!(f, "pid={} CHILD-BORN", std::process::id())
+                        });
                     IS_FORK_CHILD.store(true, Ordering::SeqCst);
                     // Die when parent exits
                     #[cfg(target_os = "linux")]
@@ -247,6 +255,13 @@ where
                     }
                     drop(parent_sock);
                     child_fd_opt = Some(child_sock.into_raw_fd());
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true).append(true)
+                        .open("/tmp/forkpool.log")
+                        .and_then(|mut f| {
+                            use std::io::Write;
+                            writeln!(f, "pid={} CHILD-READY fd={}", std::process::id(), child_fd_opt.unwrap())
+                        });
                     break;
                 }
             }
