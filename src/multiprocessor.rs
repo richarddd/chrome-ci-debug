@@ -431,11 +431,11 @@ macro_rules! fork_pool {
 
         #[ctor::ctor]
         fn __init_fork_pool_ctor() {
-            // Spawn a thread that waits for .init_array to finish (dl mutex released),
-            // then forks. The dl mutex is held by the main thread during .init_array;
-            // our thread's init_pool→fork→child→dlopen will block until it's released,
-            // then proceed without deadlock.
             std::thread::spawn(|| {
+                // Wait for .init_array to complete by doing a dummy dlopen.
+                // The dl mutex is held during .init_array; this blocks until released.
+                #[cfg(target_os = "linux")]
+                unsafe { libc::dlopen(std::ptr::null(), libc::RTLD_NOW); }
                 $name.init_pool($crate::fork_pool!(@concurrency $($n)?), $init, $work);
             });
         }
