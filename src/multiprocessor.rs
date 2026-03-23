@@ -234,6 +234,19 @@ where
                             writeln!(f, "pid={} CHILD-BORN", std::process::id())
                         });
                     IS_FORK_CHILD.store(true, Ordering::SeqCst);
+                    // Kill child when parent process exits.
+                    // We use getppid() polling instead of PR_SET_PDEATHSIG because
+                    // the latter tracks the forking *thread*, not process — if the
+                    // forking thread exits (deferred fork pools), children get killed.
+                    let ppid = nix::unistd::getppid();
+                    std::thread::spawn(move || {
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_secs(1));
+                            if nix::unistd::getppid() != ppid {
+                                std::process::exit(0);
+                            }
+                        }
+                    });
                     #[cfg(target_os = "macos")]
                     {
                         let ppid = nix::unistd::getppid().as_raw();
